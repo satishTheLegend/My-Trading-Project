@@ -55,6 +55,7 @@ TESTNET_BASE = "https://testnet.binancefuture.com"
 ENV_API_KEY = "BINANCE_API_KEY"
 ENV_API_SECRET = "BINANCE_API_SECRET"
 ENV_LIVE = "BINANCE_LIVE"               # "true" → mainnet; default → testnet
+ENV_TESTNET = "BINANCE_TESTNET"         # "false" → mainnet (mirrors env_loader.py toggle)
 ENV_BASE_OVERRIDE = "BINANCE_BASE_URL"  # explicit override beats both
 
 DEFAULT_RECV_WINDOW_MS = 5000
@@ -91,6 +92,11 @@ def _resolve_base_url() -> str:
     if explicit:
         return explicit.rstrip("/")
     if os.environ.get(ENV_LIVE, "").strip().lower() == "true":
+        return PROD_BASE
+    # env_loader.py uses BINANCE_TESTNET as the primary toggle; honour it here
+    # so operators only need to set one variable.  BINANCE_TESTNET=false means
+    # "not testnet" → mainnet.  Any other value (or absent) keeps testnet.
+    if os.environ.get(ENV_TESTNET, "").strip().lower() == "false":
         return PROD_BASE
     return TESTNET_BASE
 
@@ -297,7 +303,7 @@ __all__ = [
     "SignedClient",
     "CredentialsMissingError",
     "SignedRequestsDisabledError",
-    "ENV_API_KEY", "ENV_API_SECRET", "ENV_LIVE", "ENV_BASE_OVERRIDE",
+    "ENV_API_KEY", "ENV_API_SECRET", "ENV_LIVE", "ENV_TESTNET", "ENV_BASE_OVERRIDE",
     "PROD_BASE", "TESTNET_BASE",
     "sign_payload",
 ]

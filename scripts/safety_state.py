@@ -185,7 +185,13 @@ class SafetyStateManager:
 
     def load(self) -> SafetyState:
         d = self._read_json(self.risk_state_path)
-        return SafetyState.from_jsonable(d) if d else SafetyState()
+        if d is not None:
+            return SafetyState.from_jsonable(d)
+        # File absent on cold start — create it with safe defaults so subsequent
+        # probes (health_check, run_safety_reset --status) never hit FileNotFoundError.
+        state = SafetyState()
+        self.save(state)
+        return state
 
     # ----- write -------------------------------------------------------
 
