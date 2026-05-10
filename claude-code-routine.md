@@ -7,6 +7,22 @@ The project was designed for Claude Code — that's why it has
 
 For raw CLI usage (no Claude Code), see `wiki.md`. For the system architecture, see `agency/workflow.md`.
 
+## Session Context
+
+Every session reads and writes `memory/session-context.md` automatically via `.claude/settings.json` hooks:
+
+- **SessionStart hook**: prints current safety state + session context to give Claude instant situational awareness.
+- **Stop hook**: runs `run_reconcile` after every response to keep position state fresh.
+
+At the end of each trading cycle, the orchestrator or user-report-agent updates `memory/session-context.md` with:
+- What happened this session (trades, decisions, fixes)
+- What still needs attention (open issues, unresolved positions)
+- Safety state snapshot
+- Environment variable status
+- Instructions for the next session
+
+**Read `memory/session-context.md` at the start of every session** — it is the fastest path to understanding where the agency left off.
+
 ## Contents
 
 1. [One-time setup](#1-one-time-setup)

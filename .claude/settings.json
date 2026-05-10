@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m scripts.run_safety_reset --status 2>/dev/null && echo '--- session-context ---' && cat memory/session-context.md 2>/dev/null || echo 'No session context yet.'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m scripts.run_reconcile --no-permission-check 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python -m scripts.run_paper_cycle:*)",
+      "Bash(python -m scripts.run_watch_positions:*)",
+      "Bash(python -m scripts.run_backtest:*)",
+      "Bash(python -m scripts.run_learning_report:*)",
+      "Bash(python -m scripts.binance_position_sync:*)",
+      "Bash(python -m scripts.run_reconcile:*)",
+      "Bash(python -m scripts.run_safety_reset:*)",
+      "Bash(python -m scripts.run_approvals:*)",
+      "Bash(python -m scripts.mode_manager:*)",
+      "Bash(python -m scripts.telegram_bot:*)",
+      "Bash(python -m scripts.health_check:*)",
+      "Read(memory/*)",
+      "Read(data/*)",
+      "Read(config/*)",
+      "Edit(memory/user-rules.md)",
+      "Edit(memory/session-context.md)"
+    ],
+    "ask": [
+      "Bash(python -m scripts.run_live_cycle:*)",
+      "Bash(python -m scripts.run_full_auto_cycle:*)",
+      "Bash(python -m scripts.run_emergency_close:*)"
+    ]
+  }
+}

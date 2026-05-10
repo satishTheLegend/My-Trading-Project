@@ -382,3 +382,16 @@ Log of every Safety/Kill-Switch Agent action: pauses, emergency exits, blocked e
 - duration_minutes: 0
 - resolved_at: 2026-05-10T15:50:36Z
 - resolution_notes: emergency_close_all completed
+
+## SAFETY-20260510-170936
+
+- timestamp: 2026-05-10T17:09:36Z
+- mode: ANY
+- event_type: manual_daily_reset
+- triggered_by: user
+- details: forced daily rollover; previous day daily_pnl=0 trades=0
+- positions_affected: []
+- action_taken: daily counters zeroed; pause cleared if not carry-over
+- duration_minutes: 0
+- resolved_at: 2026-05-10T17:09:36Z
+- resolution_notes: run_safety_reset --reset-daily

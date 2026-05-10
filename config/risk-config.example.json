@@ -1,7 +1,11 @@
 {
   "max_margin_per_trade_usdt": 2,
   "default_margin_per_trade_usdt": 1,
+  "max_leverage": 5,
   "max_planned_loss_pct_of_margin": 0.05,
+  "daily_max_loss_pct": 0.15,
+  "max_consecutive_losses": 3,
+  "max_open_positions": 2,
   "min_liquidation_distance_pct": 0.30,
   "max_spread_bps": 20,
   "min_24h_quote_volume_usdt": 5000000,
