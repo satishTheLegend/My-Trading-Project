@@ -43,6 +43,7 @@ from .binance_signed_client import (
     SignedClient,
     SignedRequestsDisabledError,
 )
+from .env_loader import load_env
 from .execution_router import ExecutionRouter
 from .health_check import run_health_check
 from .journal_writer import (
@@ -161,7 +162,19 @@ def main(argv: list[str] | None = None) -> int:
         _emit(report)
         return 0
 
-    # --- 3) Signed client + permission preflight ---
+    # --- 3) ALLOW_LIVE_EXECUTION gate + signed client + permission preflight ---
+    env = load_env()
+    if not env.allow_live_execution:
+        print(json.dumps({
+            "error": "refusing to enable signed requests: ALLOW_LIVE_EXECUTION is not set to true",
+            "explanation": (
+                "Set ALLOW_LIVE_EXECUTION=true in your environment to permit signed "
+                "Binance API calls. This gate exists to prevent accidental live order "
+                "placement when the env is not explicitly configured for live trading."
+            ),
+        }, indent=2))
+        return 2
+
     signed_client = SignedClient()
     signed_client.enable_signed_requests()
     account = Account(signed_client)
