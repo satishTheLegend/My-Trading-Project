@@ -408,3 +408,16 @@ Log of every Safety/Kill-Switch Agent action: pauses, emergency exits, blocked e
 - duration_minutes: 0
 - resolved_at: N/A — blocks still active
 - resolution_notes: User must (1) verify MYSTERYUSDT on Binance Web UI, (2) either get testnet API keys for testnet trading or deploy on non-geo-restricted server for mainnet trading, (3) confirm BINANCE_TESTNET env matches intended exchange.
+
+## SAFETY-20260510-172133
+
+- timestamp: 2026-05-10T17:21:33Z
+- mode: ANY
+- event_type: manual_pause
+- triggered_by: user
+- details: User requested stop routine — manual pause via Claude Code session
+- positions_affected: []
+- action_taken: trading paused
+- duration_minutes: 0
+- resolved_at: 
+- resolution_notes: run_safety_reset --pause
