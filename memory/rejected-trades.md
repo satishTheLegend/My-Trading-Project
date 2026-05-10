@@ -439,3 +439,17 @@ Record of every trade proposal that was NOT executed, with reason. Critical for 
 - market_regime: unknown
 - hindsight_outcome: unclear
 - hindsight_notes:
+
+## REJECTED-20260510-002
+
+- proposal_id: PROP-20260510-LAYERUSDT-001
+- mode: SEMI_AUTO_LIVE (attempted)
+- symbol: LAYERUSDT
+- side: LONG
+- strategy: pullback_long (oversold pullback near 12h support)
+- proposed_at: 2026-05-10T17:25:00Z
+- rejected_by: safety-agent
+- rejection_reason: Binance mainnet API returns HTTP -2015 (geo-restriction / IP not whitelisted). Live order placement impossible from this server environment. BINANCE_TESTNET=false but production endpoint returns 451 Forbidden — server IP is not authorized for mainnet Binance Futures API calls. All 9 other risk checks passed (spread 8 bps PASS, stop before liquidation PASS, min_notional 5.01 PASS, rr 2.0 PASS, max_loss 1.15% of wallet PASS, funding advantageous PASS, no consecutive losses PASS, trading not paused PASS).
+- market_regime: volatile (small-cap pumps active; BTC sideways +0.81%, ETH +1.12%)
+- hindsight_outcome: unclear
+- hindsight_notes: LAYERUSDT showed oversold 15m RSI (37.2) at 4.2% of 12h range with spread 8 bps. Setup was technically valid. Could not execute due to API geo-restriction.
