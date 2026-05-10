@@ -1,0 +1,31 @@
+{
+  "enabled": false,
+  "long_polling": true,
+  "webhook": false,
+  "webhook_url": "",
+  "poll_interval_seconds": 3,
+  "long_poll_timeout_seconds": 25,
+  "alert_after": [
+    "workflow_start",
+    "mode_change",
+    "binance_sync_result",
+    "manual_position_detected",
+    "trade_proposal_created",
+    "risk_approved",
+    "risk_rejected",
+    "live_order_placed",
+    "entry_filled",
+    "stop_protection_placed",
+    "tp_hit",
+    "partial_exit",
+    "full_exit",
+    "emergency_exit",
+    "trade_closed",
+    "daily_summary",
+    "safety_warning",
+    "api_failure",
+    "position_mismatch"
+  ],
+  "max_message_length": 4000,
+  "notes": "Real values (token, chat IDs) live in the env, not this file. This is just toggles."
+}

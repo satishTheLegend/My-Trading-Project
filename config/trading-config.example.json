@@ -1,0 +1,19 @@
+{
+  "mode": "PAPER_TRADING",
+  "wallet": {
+    "starting_usdt": 10,
+    "stop_below_usdt": 6
+  },
+  "limits": {
+    "max_open_positions": 2,
+    "max_daily_loss_pct": 0.15,
+    "max_consecutive_losses": 3,
+    "no_duplicate_symbol": true
+  },
+  "preferred_margin_mode": "ISOLATED",
+  "default_leverage": 3,
+  "max_leverage": 5,
+  "fee_rate_taker": 0.0005,
+  "fee_rate_maker": 0.0002,
+  "min_expected_net_profit_pct": 0.01
+}

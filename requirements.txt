@@ -1,0 +1,9 @@
+# Phase 2: zero runtime deps for the agency itself — everything in scripts/
+# uses Python 3.10+ stdlib. The lines below are dev-only.
+
+# Tests
+pytest>=7.4
+
+# Phase 4 will add:
+#   python-binance>=1.0   (or ccxt) — signed API client
+#   websocket-client>=1.6 — userDataStream + market streams

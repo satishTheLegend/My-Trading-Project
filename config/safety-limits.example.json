@@ -1,0 +1,21 @@
+{
+  "wallet_usdt": 10,
+  "min_wallet_balance_usdt": 5,
+  "max_margin_per_trade_usdt": 2,
+  "max_margin_per_trade_percent_of_wallet": 20,
+  "max_planned_loss_per_trade_margin_percent": 5,
+  "daily_max_loss_percent": 15,
+  "max_consecutive_losses": 3,
+  "cooldown_minutes_after_consecutive_losses": 60,
+  "max_open_positions": 2,
+  "no_duplicate_symbol": true,
+  "per_cycle_trade_cap": 5,
+  "approval_threshold_usdt": 50,
+  "carry_over_pause_for_hard_incidents": true,
+  "hard_incidents_that_carry_over": [
+    "withdrawal_permission_detected",
+    "position_manager_mismatch",
+    "api_credential_failure"
+  ],
+  "notes": "These caps mirror what scripts/safety_state.py + scripts/limits.py + scripts/approval_policy.py enforce. env vars override these for a given run."
+}

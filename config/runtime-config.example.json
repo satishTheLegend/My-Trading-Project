@@ -1,0 +1,12 @@
+{
+  "mode": "paper",
+  "allow_live_execution": false,
+  "allow_manual_position_management": true,
+  "allow_auto_close_manual_positions": false,
+  "require_telegram_confirmation_for_live_order": false,
+  "default_top_n_candidates": 3,
+  "default_screener_min_quote_volume_usdt": 5000000,
+  "watcher_interval_seconds": 60,
+  "reconcile_interval_seconds": 300,
+  "notes": "Copy to runtime-config.json if you want a non-default profile. env vars always win over this file."
+}

@@ -1,0 +1,12 @@
+{
+  "universe": "BINANCE_USDTM_FUTURES",
+  "include_filters": {
+    "decimal_priced_only": true,
+    "min_24h_quote_volume_usdt": 5000000,
+    "max_spread_bps": 20
+  },
+  "always_avoid": [],
+  "favorites": [],
+  "max_candidates_per_scan": 25,
+  "max_deep_research_per_cycle": 5
+}

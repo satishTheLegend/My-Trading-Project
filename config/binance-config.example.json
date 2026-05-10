@@ -1,0 +1,12 @@
+{
+  "testnet": true,
+  "require_no_withdraw_permission": true,
+  "default_margin_mode": "ISOLATED",
+  "default_leverage": 3,
+  "max_leverage": 5,
+  "supported_quote_assets": ["USDT"],
+  "rate_limit_weight_per_minute": 2400,
+  "soft_weight_threshold_pct": 85,
+  "user_data_stream_enabled": false,
+  "notes": "Real API key + secret live in env vars only. See config/env.example."
+}

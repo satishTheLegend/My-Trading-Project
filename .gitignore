@@ -1,0 +1,72 @@
+# =============================================================================
+# Secrets — must NEVER be committed.
+# =============================================================================
+.env
+.env.*
+!config/env.example
+*.key
+*.secret
+*.pem
+secrets.json
+credentials.json
+
+# Common typos / "I'll commit it just for now" filenames — block them all.
+binance-api-key*
+binance_api_key*
+api-keys*
+api_keys*
+telegram-token*
+telegram_token*
+
+# =============================================================================
+# Local Claude Code config (per-user permissions / hooks)
+# =============================================================================
+.claude/settings.local.json
+
+# =============================================================================
+# Runtime state — changes every cycle, could leak trading activity in public.
+# Keep the JSON state files local. The .example files stay tracked.
+# =============================================================================
+data/*.json
+data/*.jsonl
+!data/*.example.json
+!data/.gitkeep
+
+# Memory journals are usually OK to track (they're your history) but if your
+# repo is public you might want them private — uncomment to ignore:
+# memory/*.md
+# !memory/*.example.md
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# =============================================================================
+# Editor / OS
+# =============================================================================
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# Logs
+# =============================================================================
+*.log
+logs/
