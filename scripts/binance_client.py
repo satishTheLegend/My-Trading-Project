@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import time
 import urllib.error
@@ -33,6 +34,13 @@ log = logging.getLogger(__name__)
 # (testnet's small-cap symbol set is too sparse to screen meaningfully).
 PROD_BASE = "https://fapi.binance.com"
 TESTNET_BASE = "https://testnet.binancefuture.com"
+
+# Env-var values that count as "true" for BINANCE_TESTNET (case-insensitive).
+_TESTNET_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _testnet_env_enabled() -> bool:
+    return os.environ.get("BINANCE_TESTNET", "").strip().lower() in _TESTNET_TRUTHY
 
 # Per-minute weight cap reported by exchangeInfo. Stay well under this.
 DEFAULT_WEIGHT_CAP_PER_MIN = 2400
@@ -62,9 +70,13 @@ class BinanceClient:
 
     Thread-safety: not safe for use from multiple threads. Construct one per
     worker. The agency only needs a single client per process.
+
+    Base URL precedence: explicit ``base_url`` argument > BINANCE_TESTNET env
+    var > production default. Sandbox/CI environments where production is
+    geo-blocked can set ``BINANCE_TESTNET=true`` and skip the constructor arg.
     """
 
-    base_url: str = PROD_BASE
+    base_url: str | None = None
     timeout_s: float = 10.0
     max_retries: int = 4
     user_agent: str = "binance-futures-ai-agency/0.2"
@@ -73,6 +85,12 @@ class BinanceClient:
     # internal weight bookkeeping
     _used_weight_1m: int = 0
     _used_weight_window_started: float = field(default_factory=time.monotonic)
+
+    def __post_init__(self) -> None:
+        # Explicit constructor arg always wins; otherwise fall back to env-var
+        # auto-detection so callers don't have to monkey-patch in CI.
+        if self.base_url is None:
+            self.base_url = TESTNET_BASE if _testnet_env_enabled() else PROD_BASE
 
     # ----- public ----------------------------------------------------------
 
