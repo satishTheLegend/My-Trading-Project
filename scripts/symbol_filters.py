@@ -18,6 +18,7 @@ precision quickly and trips Binance's strict step validation.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any
