@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from decimal import Decimal
 
 import pytest
 
-from scripts.limits import LimitCheck, check_proposal
+from scripts.limits import (
+    LimitCheck,
+    REENTRY_COOLDOWN_AFTER_LOSS_MINUTES,
+    REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES,
+    _check_recent_close_cooldown,
+    check_proposal,
+)
 from scripts.positions_store import Position, make_position_id
 from scripts.safety_state import SafetyLimits, SafetyState
 
@@ -117,3 +124,171 @@ def test_multiple_breaches_listed_together():
     assert not lc.ok
     assert "paused" in lc.breached
     assert "consecutive_loss_limit" in lc.breached
+
+
+# ----------------------------------------------------------------------------
+# Same-symbol re-entry cooldown (ENH-2026-05-11T16:55Z)
+# ----------------------------------------------------------------------------
+
+
+def _closed(
+    symbol: str,
+    *,
+    exit_reason: str,
+    closed_at: dt.datetime,
+) -> Position:
+    iso = closed_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return Position(
+        position_id=make_position_id(symbol, when=closed_at),
+        symbol=symbol, side="LONG", status="closed",
+        entry_price=Decimal("1.0"),
+        quantity=Decimal("0"), initial_quantity=Decimal("100"),
+        leverage=3, margin_mode="ISOLATED",
+        margin_usdt=Decimal("2"), notional_usdt=Decimal("6"),
+        stop_loss=Decimal("0.95"),
+        take_profit_targets=[Decimal("1.05")],
+        unrealized_pnl=Decimal("0"), realized_pnl=Decimal("-0.5"),
+        max_favorable_pnl=Decimal("0"), max_adverse_pnl=Decimal("-0.5"),
+        liquidation_price=Decimal("0.5"),
+        fees_paid_usdt=Decimal("0.01"), funding_paid_usdt=Decimal("0"),
+        proposal_id="P", strategy="momentum_continuation",
+        market_regime="bullish",
+        opened_at=iso, updated_at=iso,
+        closed_at=iso, exit_price=Decimal("0.95"), exit_reason=exit_reason,
+        mode="LIVE",
+    )
+
+
+def test_cooldown_loss_60_min_ago_rejects():
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    closed = _closed("FOOUSDT", exit_reason="stop_loss",
+                     closed_at=now - dt.timedelta(minutes=60))
+    allowed, reason = _check_recent_close_cooldown(
+        "FOOUSDT", [closed], now=now,
+    )
+    assert not allowed
+    assert "re-entry cooldown" in reason
+    assert "stop_loss" in reason
+
+
+def test_cooldown_take_profit_60_min_ago_allows():
+    """TP cooldown is 30 min — at 60 min it's expired."""
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    closed = _closed("FOOUSDT", exit_reason="take_profit",
+                     closed_at=now - dt.timedelta(minutes=60))
+    allowed, reason = _check_recent_close_cooldown(
+        "FOOUSDT", [closed], now=now,
+    )
+    assert allowed
+    assert reason == ""
+
+
+def test_cooldown_take_profit_10_min_ago_rejects():
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    closed = _closed("FOOUSDT", exit_reason="take_profit",
+                     closed_at=now - dt.timedelta(minutes=10))
+    allowed, reason = _check_recent_close_cooldown(
+        "FOOUSDT", [closed], now=now,
+    )
+    assert not allowed
+    assert "take_profit" in reason
+
+
+def test_cooldown_never_traded_allows():
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    other = _closed("OTHERUSDT", exit_reason="stop_loss",
+                    closed_at=now - dt.timedelta(minutes=5))
+    allowed, reason = _check_recent_close_cooldown(
+        "FOOUSDT", [other], now=now,
+    )
+    assert allowed
+    assert reason == ""
+
+
+def test_cooldown_uses_most_recent_close():
+    """Stale loss 4h ago and recent TP 5min ago — recent close governs."""
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    old_loss = _closed("FOOUSDT", exit_reason="stop_loss",
+                       closed_at=now - dt.timedelta(hours=4))
+    fresh_tp = _closed("FOOUSDT", exit_reason="take_profit",
+                       closed_at=now - dt.timedelta(minutes=5))
+    allowed, reason = _check_recent_close_cooldown(
+        "FOOUSDT", [old_loss, fresh_tp], now=now,
+    )
+    assert not allowed
+    assert "take_profit" in reason
+
+
+def test_cooldown_loss_3h_ago_just_expired():
+    """At exactly the window boundary, cooldown has expired."""
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    closed = _closed(
+        "FOOUSDT", exit_reason="stop_loss",
+        closed_at=now - dt.timedelta(minutes=REENTRY_COOLDOWN_AFTER_LOSS_MINUTES),
+    )
+    allowed, _ = _check_recent_close_cooldown("FOOUSDT", [closed], now=now)
+    assert allowed
+
+
+def test_cooldown_loss_sl_trail_locked_treated_as_loss():
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    closed = _closed("FOOUSDT", exit_reason="sl_trail_locked",
+                     closed_at=now - dt.timedelta(minutes=30))
+    allowed, reason = _check_recent_close_cooldown(
+        "FOOUSDT", [closed], now=now,
+    )
+    assert not allowed
+    assert "sl_trail_locked" in reason
+
+
+def test_cooldown_unknown_exit_reason_does_not_block():
+    """Manual / reconciliation exits aren't in either bucket — no cooldown."""
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    closed = _closed("FOOUSDT", exit_reason="manual_close_by_user_ios",
+                     closed_at=now - dt.timedelta(minutes=5))
+    allowed, reason = _check_recent_close_cooldown(
+        "FOOUSDT", [closed], now=now,
+    )
+    assert allowed
+    assert reason == ""
+
+
+def test_cooldown_giveback_protection_is_profit_bucket():
+    """30-min cooldown applies to giveback_protection_exit (came from winner)."""
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    closed = _closed("FOOUSDT", exit_reason="giveback_protection_exit",
+                     closed_at=now - dt.timedelta(minutes=10))
+    allowed, reason = _check_recent_close_cooldown(
+        "FOOUSDT", [closed], now=now,
+    )
+    assert not allowed
+    assert "giveback_protection_exit" in reason
+
+
+def test_check_proposal_integrates_cooldown_as_soft_skip():
+    """check_proposal surfaces the cooldown breach when given closed history."""
+    now = dt.datetime(2026, 5, 12, 18, 0, 0, tzinfo=dt.timezone.utc)
+    closed = _closed("FOOUSDT", exit_reason="stop_loss",
+                     closed_at=now - dt.timedelta(minutes=30))
+    lc = check_proposal(
+        state=_state(),
+        limits=SafetyLimits(),
+        proposed_symbol="FOOUSDT",
+        open_positions=[],
+        fired_this_cycle=0,
+        recently_closed_positions=[closed],
+    )
+    assert not lc.ok
+    assert "reentry_cooldown" in lc.breached
+
+
+def test_check_proposal_no_cooldown_param_back_compat():
+    """Old callers that don't pass recently_closed_positions still work."""
+    lc = check_proposal(
+        state=_state(),
+        limits=SafetyLimits(),
+        proposed_symbol="FOOUSDT",
+        open_positions=[],
+        fired_this_cycle=0,
+    )
+    assert lc.ok

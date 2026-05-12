@@ -49,6 +49,7 @@ log = logging.getLogger(__name__)
 
 PROD_BASE = "https://fapi.binance.com"
 TESTNET_BASE = "https://testnet.binancefuture.com"
+SPOT_PROD_BASE = "https://api.binance.com"
 
 # Names of env vars we read. Centralized so unit tests can monkeypatch them
 # in one place.
@@ -228,7 +229,8 @@ class SignedClient:
         ordered = sorted(all_params.items())
         payload = urllib.parse.urlencode(ordered)
         signature = sign_payload(api_secret, payload)
-        url = f"{self.base_url}{path}?{payload}&signature={signature}"
+        host = SPOT_PROD_BASE if (path.startswith("/sapi/") and self.is_mainnet) else self.base_url
+        url = f"{host}{path}?{payload}&signature={signature}"
 
         return self._do_request(method, url, api_key)
 

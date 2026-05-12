@@ -333,6 +333,128 @@ class LiveExecution:
             "DELETE", "/fapi/v1/allOpenOrders", params={"symbol": symbol},
         )
 
+    # ----- algo-order helpers (post-2025-12 Binance migration) ----------
+    #
+    # Binance migrated conditional/protective orders (STOP_MARKET,
+    # TAKE_PROFIT_MARKET with reduceOnly) to the dedicated `/fapi/v1/algoOrder`
+    # endpoint family on 2025-12-09. The new schema requires (verified by
+    # dry-run probe against live mainnet on 2026-05-11):
+    #   - algoType=CONDITIONAL                (new — was implicit before)
+    #   - type=STOP_MARKET | TAKE_PROFIT_MARKET   (still `type`, NOT `orderType`)
+    #   - triggerPrice                        (was `stopPrice`)
+    #   - clientAlgoId                        (was `newClientOrderId`)
+    #   - positionSide=BOTH                   (explicit for one-way accounts)
+    #   - timeInForce=GTC, workingType, priceProtect, reduceOnly, quantity
+    #
+    # The legacy schema returns HTTP 400 / code -1102 "Mandatory parameter
+    # algotype not sent". These helpers are the **only** path the router and
+    # watcher use to place / cancel conditional brackets — keep them in sync
+    # with the schema. Cancel endpoint is DELETE /fapi/v1/algoOrder by algoId.
+
+    def place_algo_stop_market(
+        self,
+        spec: SymbolSpec,
+        *,
+        side: str,                       # EXIT side: SELL closes a LONG, BUY closes a SHORT
+        stop_price: Decimal,
+        quantity: Decimal,
+        working_type: str = "MARK_PRICE",
+        price_protect: bool = True,
+        client_order_id: str | None = None,
+    ) -> OrderResult:
+        """Place a reduce-only STOP_MARKET algo order via /fapi/v1/algoOrder.
+
+        Sends the post-2025-12 algoOrder schema:
+        algoType=CONDITIONAL, orderType=STOP_MARKET, triggerPrice, clientAlgoId.
+
+        ``stop_price`` is the internal Python name — it is transmitted to
+        Binance as ``triggerPrice``. ``client_order_id`` is transmitted as
+        ``clientAlgoId``. The watcher and router call this through the legacy
+        Python kwargs for source-code compatibility; the wire payload is the
+        new schema.
+        """
+        self._preflight()
+        if side not in ("BUY", "SELL"):
+            raise ValueError("side must be BUY or SELL (the EXIT side)")
+        if working_type not in ("MARK_PRICE", "CONTRACT_PRICE"):
+            raise ValueError("working_type must be MARK_PRICE or CONTRACT_PRICE")
+        params: dict[str, Any] = {
+            "symbol": spec.symbol,
+            "side": side,
+            "positionSide": "BOTH",
+            "algoType": "CONDITIONAL",
+            "type": "STOP_MARKET",
+            "triggerPrice": _fmt(stop_price),
+            "quantity": _fmt(quantity),
+            "reduceOnly": "true",
+            "workingType": working_type,
+            "priceProtect": "true" if price_protect else "false",
+            "timeInForce": "GTC",
+        }
+        if client_order_id:
+            params["clientAlgoId"] = client_order_id
+        return _to_result(self.client.signed_request(
+            "POST", "/fapi/v1/algoOrder", params=params,
+        ))
+
+    def place_algo_take_profit_market(
+        self,
+        spec: SymbolSpec,
+        *,
+        side: str,                       # EXIT side: SELL closes a LONG, BUY closes a SHORT
+        stop_price: Decimal,
+        quantity: Decimal,
+        working_type: str = "MARK_PRICE",
+        price_protect: bool = True,
+        client_order_id: str | None = None,
+    ) -> OrderResult:
+        """Place a reduce-only TAKE_PROFIT_MARKET algo order via /fapi/v1/algoOrder.
+
+        Symmetric to ``place_algo_stop_market`` — same new-schema wire
+        payload, only ``orderType`` differs (TAKE_PROFIT_MARKET instead of
+        STOP_MARKET). ``stop_price`` is still the internal Python name and
+        maps to ``triggerPrice`` on the wire.
+        """
+        self._preflight()
+        if side not in ("BUY", "SELL"):
+            raise ValueError("side must be BUY or SELL (the EXIT side)")
+        if working_type not in ("MARK_PRICE", "CONTRACT_PRICE"):
+            raise ValueError("working_type must be MARK_PRICE or CONTRACT_PRICE")
+        params: dict[str, Any] = {
+            "symbol": spec.symbol,
+            "side": side,
+            "positionSide": "BOTH",
+            "algoType": "CONDITIONAL",
+            "type": "TAKE_PROFIT_MARKET",
+            "triggerPrice": _fmt(stop_price),
+            "quantity": _fmt(quantity),
+            "reduceOnly": "true",
+            "workingType": working_type,
+            "priceProtect": "true" if price_protect else "false",
+            "timeInForce": "GTC",
+        }
+        if client_order_id:
+            params["clientAlgoId"] = client_order_id
+        return _to_result(self.client.signed_request(
+            "POST", "/fapi/v1/algoOrder", params=params,
+        ))
+
+    def cancel_algo_order(self, symbol: str, *, algo_id: int | str) -> dict[str, Any]:
+        """Cancel a single algo order by ``algoId``.
+
+        Returns the raw Binance response. Raises BinanceAPIError on a hard
+        failure. The caller is responsible for deciding whether to retry or
+        abandon the operation — for trailing stops, the watcher must abort
+        the local-state mutation if this call fails.
+        """
+        self._preflight()
+        if algo_id is None:
+            raise ValueError("algo_id is required")
+        return self.client.signed_request(
+            "DELETE", "/fapi/v1/algoOrder",
+            params={"symbol": symbol, "algoId": str(algo_id)},
+        )
+
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -349,14 +471,24 @@ def _fmt(d: Decimal | int | float) -> str:
 
 
 def _to_result(raw: dict[str, Any]) -> OrderResult:
+    # Algo-order responses report the identifier as `algoId` rather than
+    # `orderId`, and the client handle as `clientAlgoId` rather than
+    # `clientOrderId`. Either pair is fine for our purposes — the
+    # OrderResult.order_id field is just the canonical numeric handle and
+    # client_order_id is the canonical client handle.
+    oid = raw.get("orderId") or raw.get("algoId") or 0
+    try:
+        order_id_int = int(oid) or None
+    except (TypeError, ValueError):
+        order_id_int = None
     return OrderResult(
         success=True,
-        order_id=int(raw.get("orderId", 0)) or None,
-        client_order_id=raw.get("clientOrderId"),
-        status=str(raw.get("status", "")),
+        order_id=order_id_int,
+        client_order_id=raw.get("clientOrderId") or raw.get("clientAlgoId"),
+        status=str(raw.get("status") or raw.get("algoStatus") or ""),
         symbol=str(raw.get("symbol", "")),
         side=str(raw.get("side", "")),
-        type=str(raw.get("type", "")),
+        type=str(raw.get("type") or raw.get("orderType") or ""),
         avg_price=Decimal(str(raw.get("avgPrice", "0") or "0")),
         executed_qty=Decimal(str(raw.get("executedQty", "0") or "0")),
         cum_quote=Decimal(str(raw.get("cumQuote", "0") or "0")),

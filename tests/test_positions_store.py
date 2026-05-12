@@ -100,3 +100,163 @@ def test_remove_closed_keeps_open(tmp_path: Path):
     assert removed == 1
     rest = store.load_all()
     assert len(rest) == 1 and rest[0].symbol == "A"
+
+
+# ----------------------------------------------------------------------------
+# Watcher-clobber race regression tests (memory/execution-errors.md
+# ERROR-20260511-6). The watcher must NEVER overwrite fields outside the
+# whitelist, even when another writer raced ahead of it.
+# ----------------------------------------------------------------------------
+
+
+def test_apply_watcher_updates_does_not_clobber_stop_loss(tmp_path: Path):
+    """A concurrent writer's new stop_loss must survive a watcher update."""
+    store = PositionsStore(tmp_path / "open-positions.json")
+    p = _make(symbol="BUSDT")
+    store.upsert(p)
+
+    # Concurrent writer (e.g. emergency_close or operator script) updates
+    # stop_loss directly in the JSON. Watcher then arrives with its own
+    # tick.
+    raw = json.loads((tmp_path / "open-positions.json").read_text())
+    raw["positions"][0]["stop_loss"] = "0.4514"
+    raw["positions"][0]["algo_order_ids"] = {"sl": "NEW-ALGO-ID-9999"}
+    (tmp_path / "open-positions.json").write_text(json.dumps(raw, indent=2))
+
+    outcome = store.apply_watcher_updates({
+        p.position_id: {
+            "unrealized_pnl": Decimal("0.5"),
+            "max_favorable_pnl": Decimal("0.5"),
+            "stop_loss": Decimal("999.0"),                # MUST be dropped
+            "algo_order_ids": {"sl": "OLD-ALGO-ID-1111"}, # MUST be dropped
+            "status": "closed",                            # MUST be dropped
+        },
+    })
+    assert outcome[p.position_id] == "merged"
+
+    after = json.loads((tmp_path / "open-positions.json").read_text())
+    row = after["positions"][0]
+    # Concurrent writer's values must be preserved.
+    assert row["stop_loss"] == "0.4514"
+    assert row["algo_order_ids"] == {"sl": "NEW-ALGO-ID-9999"}
+    assert row["status"] == "open"
+    # Whitelisted fields were applied.
+    assert row["unrealized_pnl"] == "0.5"
+    assert row["max_favorable_pnl"] == "0.5"
+
+
+def test_apply_watcher_updates_ratchets_mfe_up_only(tmp_path: Path):
+    store = PositionsStore(tmp_path / "open-positions.json")
+    p = _make(symbol="A")
+    p.max_favorable_pnl = Decimal("1.50")
+    store.upsert(p)
+
+    # A stale tick tries to LOWER max_favorable_pnl — must be ignored.
+    outcome = store.apply_watcher_updates({
+        p.position_id: {"max_favorable_pnl": Decimal("0.20")},
+    })
+    assert outcome[p.position_id] in ("skipped:no_change", "merged")
+    row = json.loads((tmp_path / "open-positions.json").read_text())["positions"][0]
+    assert row["max_favorable_pnl"] == "1.50"
+
+    # A higher tick must take effect.
+    store.apply_watcher_updates({
+        p.position_id: {"max_favorable_pnl": Decimal("2.00")},
+    })
+    row = json.loads((tmp_path / "open-positions.json").read_text())["positions"][0]
+    assert row["max_favorable_pnl"] == "2.00"
+
+
+def test_apply_watcher_updates_ratchets_mae_down_only(tmp_path: Path):
+    store = PositionsStore(tmp_path / "open-positions.json")
+    p = _make(symbol="A")
+    p.max_adverse_pnl = Decimal("-1.50")
+    store.upsert(p)
+
+    # A stale tick tries to RAISE max_adverse_pnl (less adverse) — ignored.
+    store.apply_watcher_updates({
+        p.position_id: {"max_adverse_pnl": Decimal("-0.20")},
+    })
+    row = json.loads((tmp_path / "open-positions.json").read_text())["positions"][0]
+    assert row["max_adverse_pnl"] == "-1.50"
+
+    # A more-adverse tick must take effect.
+    store.apply_watcher_updates({
+        p.position_id: {"max_adverse_pnl": Decimal("-2.00")},
+    })
+    row = json.loads((tmp_path / "open-positions.json").read_text())["positions"][0]
+    assert row["max_adverse_pnl"] == "-2.00"
+
+
+def test_apply_watcher_updates_skips_non_open(tmp_path: Path):
+    store = PositionsStore(tmp_path / "open-positions.json")
+    p = _make(symbol="A", status="open")
+    store.upsert(p)
+    # Concurrent writer closes the position before the watcher's flush.
+    raw = json.loads((tmp_path / "open-positions.json").read_text())
+    raw["positions"][0]["status"] = "closed"
+    raw["positions"][0]["closed_at"] = "2026-05-11T11:00:00Z"
+    raw["positions"][0]["exit_price"] = "0.07700"
+    (tmp_path / "open-positions.json").write_text(json.dumps(raw, indent=2))
+
+    outcome = store.apply_watcher_updates({
+        p.position_id: {"unrealized_pnl": Decimal("0.5")},
+    })
+    assert outcome[p.position_id].startswith("skipped:not_open")
+    row = json.loads((tmp_path / "open-positions.json").read_text())["positions"][0]
+    # Concurrent close survived.
+    assert row["status"] == "closed"
+    assert row["closed_at"] == "2026-05-11T11:00:00Z"
+    # Watcher's unrealized_pnl was NOT applied.
+    assert row["unrealized_pnl"] == "0"
+
+
+def test_apply_watcher_updates_skips_missing_position(tmp_path: Path):
+    store = PositionsStore(tmp_path / "open-positions.json")
+    store.upsert(_make(symbol="A"))
+    outcome = store.apply_watcher_updates({
+        "POS-bogus-id": {"unrealized_pnl": Decimal("0.5")},
+    })
+    assert outcome["POS-bogus-id"] == "skipped:not_found"
+
+
+def test_apply_watcher_updates_preserves_unknown_fields(tmp_path: Path):
+    """Forward-compat fields on disk (e.g. planned_loss_at_sl_usdt_initial)
+    must survive a watcher merge — apply_watcher_updates writes back the
+    raw row, not a deserialised Position."""
+    store = PositionsStore(tmp_path / "open-positions.json")
+    p = _make(symbol="A")
+    store.upsert(p)
+    raw = json.loads((tmp_path / "open-positions.json").read_text())
+    raw["positions"][0]["planned_loss_at_sl_usdt_initial"] = "0.42"
+    raw["positions"][0]["custom_future_field"] = "operator note"
+    (tmp_path / "open-positions.json").write_text(json.dumps(raw, indent=2))
+
+    store.apply_watcher_updates({
+        p.position_id: {"unrealized_pnl": Decimal("0.1")},
+    })
+    after = json.loads((tmp_path / "open-positions.json").read_text())["positions"][0]
+    assert after["planned_loss_at_sl_usdt_initial"] == "0.42"
+    assert after["custom_future_field"] == "operator note"
+    assert after["unrealized_pnl"] == "0.1"
+
+
+def test_apply_watcher_updates_appends_notes(tmp_path: Path):
+    store = PositionsStore(tmp_path / "open-positions.json")
+    p = _make(symbol="A")
+    p.notes = ["original note 1"]
+    store.upsert(p)
+    store.apply_watcher_updates({
+        p.position_id: {"notes": ["watcher note A", "watcher note B"]},
+    })
+    after = json.loads((tmp_path / "open-positions.json").read_text())["positions"][0]
+    assert after["notes"] == ["original note 1", "watcher note A", "watcher note B"]
+
+
+def test_apply_watcher_updates_empty_input_is_noop(tmp_path: Path):
+    store = PositionsStore(tmp_path / "open-positions.json")
+    store.upsert(_make(symbol="A"))
+    assert store.apply_watcher_updates({}) == {}
+    # File still valid.
+    data = json.loads((tmp_path / "open-positions.json").read_text())
+    assert len(data["positions"]) == 1

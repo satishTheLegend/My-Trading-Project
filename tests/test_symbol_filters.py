@@ -12,6 +12,8 @@ from scripts.symbol_filters import (
     PercentPriceFilter,
     PriceFilter,
     SymbolSpec,
+    is_valid_ascii_usdt_symbol,
+    parse_exchange_info,
     parse_symbol_spec,
     round_qty,
     round_price,
@@ -162,3 +164,63 @@ def test_round_qty_floors_correctly(doge_spec: SymbolSpec):
 
 def test_round_price_floors_correctly(doge_spec: SymbolSpec):
     assert round_price(doge_spec, Decimal("0.076549"), mode="down") == Decimal("0.07654")
+
+
+# ---------------------------------------------------------------------------
+# ERROR-20260511-9: ASCII-symbol guard
+# ---------------------------------------------------------------------------
+
+
+def test_ascii_symbol_guard_accepts_normal_symbols():
+    assert is_valid_ascii_usdt_symbol("BTCUSDT")
+    assert is_valid_ascii_usdt_symbol("DOGEUSDT")
+    assert is_valid_ascii_usdt_symbol("1000PEPEUSDT")
+
+
+def test_ascii_symbol_guard_rejects_non_ascii_display_name():
+    # The exact symbol that crashed the engine on 2026-05-11T17:01:36Z.
+    assert not is_valid_ascii_usdt_symbol("币安人生USDT")
+
+
+def test_ascii_symbol_guard_rejects_lowercase_and_non_usdt():
+    assert not is_valid_ascii_usdt_symbol("btcusdt")        # lowercase
+    assert not is_valid_ascii_usdt_symbol("BTCBUSD")        # wrong quote
+    assert not is_valid_ascii_usdt_symbol("")               # empty
+    assert not is_valid_ascii_usdt_symbol("BTC-USDT")       # punctuation
+    assert not is_valid_ascii_usdt_symbol(None)             # type: ignore[arg-type]
+
+
+def test_parse_exchange_info_drops_non_ascii_symbol(doge_spec: SymbolSpec):
+    """parse_exchange_info must silently skip non-ASCII symbols so they
+    never reach the screener, router, or live-execution layer."""
+    bad_raw = {
+        "symbol": "币安人生USDT", "pair": "币安人生USDT", "contractType": "PERPETUAL",
+        "status": "TRADING", "baseAsset": "币安人生", "quoteAsset": "USDT",
+        "pricePrecision": 5, "quantityPrecision": 0,
+        "filters": [
+            {"filterType": "PRICE_FILTER", "minPrice": "0.00001",
+             "maxPrice": "1000", "tickSize": "0.00001"},
+            {"filterType": "LOT_SIZE", "minQty": "1", "maxQty": "1000", "stepSize": "1"},
+            {"filterType": "MARKET_LOT_SIZE", "minQty": "1", "maxQty": "1000", "stepSize": "1"},
+            {"filterType": "MIN_NOTIONAL", "notional": "5"},
+            {"filterType": "PERCENT_PRICE", "multiplierUp": "1.15",
+             "multiplierDown": "0.85", "multiplierDecimal": "4"},
+        ],
+    }
+    good_raw = {
+        "symbol": "DOGEUSDT", "pair": "DOGEUSDT", "contractType": "PERPETUAL",
+        "status": "TRADING", "baseAsset": "DOGE", "quoteAsset": "USDT",
+        "pricePrecision": 5, "quantityPrecision": 0,
+        "filters": [
+            {"filterType": "PRICE_FILTER", "minPrice": "0.00001",
+             "maxPrice": "1000", "tickSize": "0.00001"},
+            {"filterType": "LOT_SIZE", "minQty": "1", "maxQty": "1000", "stepSize": "1"},
+            {"filterType": "MARKET_LOT_SIZE", "minQty": "1", "maxQty": "1000", "stepSize": "1"},
+            {"filterType": "MIN_NOTIONAL", "notional": "5"},
+            {"filterType": "PERCENT_PRICE", "multiplierUp": "1.15",
+             "multiplierDown": "0.85", "multiplierDecimal": "4"},
+        ],
+    }
+    out = parse_exchange_info({"symbols": [bad_raw, good_raw]})
+    assert "币安人生USDT" not in out
+    assert "DOGEUSDT" in out

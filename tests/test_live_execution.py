@@ -227,3 +227,92 @@ def test_cancel_order_requires_id_or_client_id(monkeypatch, doge_spec):
     ex = LiveExecution(client)
     with pytest.raises(ValueError):
         ex.cancel_order("DOGEUSDT")
+
+
+# ---------------------------------------------------------------------------
+# Algo-order helpers (post-2025-12 schema: algoType / triggerPrice / clientAlgoId)
+# ---------------------------------------------------------------------------
+
+
+def _algo_client(monkeypatch) -> tuple[SignedClient, dict[str, Any]]:
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    monkeypatch.delenv("BINANCE_LIVE", raising=False)
+    captured: dict[str, Any] = {"calls": []}
+
+    def fake_signed(self, method, path, params=None):
+        captured["calls"].append({"method": method, "path": path, "params": params})
+        if path == "/fapi/v1/algoOrder":
+            return {
+                "algoId": 3000001506000001,
+                "clientAlgoId": (params or {}).get("clientAlgoId", "cid"),
+                "algoStatus": "NEW",
+                "symbol": (params or {}).get("symbol", ""),
+                "side": (params or {}).get("side", ""),
+                "orderType": (params or {}).get("orderType", ""),
+                "reduceOnly": True,
+            }
+        return {}
+
+    monkeypatch.setattr(SignedClient, "signed_request", fake_signed)
+    client = SignedClient()
+    client.enable_signed_requests()
+    return client, captured
+
+
+def test_place_algo_stop_market_uses_new_schema(monkeypatch, doge_spec):
+    client, captured = _algo_client(monkeypatch)
+    ex = LiveExecution(client)
+    result = ex.place_algo_stop_market(
+        doge_spec, side="SELL", stop_price=Decimal("0.07500"),
+        quantity=Decimal("100"), client_order_id="SL-PROP-1",
+    )
+    assert result.success
+    call = captured["calls"][-1]
+    assert call["method"] == "POST"
+    assert call["path"] == "/fapi/v1/algoOrder"
+    params = call["params"]
+    # New-schema mandatory fields:
+    assert params["algoType"] == "CONDITIONAL"
+    assert params["type"] == "STOP_MARKET"
+    assert params["triggerPrice"] == "0.07500"
+    assert params["clientAlgoId"] == "SL-PROP-1"
+    assert params["positionSide"] == "BOTH"
+    assert params["timeInForce"] == "GTC"
+    assert params["workingType"] == "MARK_PRICE"
+    assert params["reduceOnly"] == "true"
+    assert params["priceProtect"] == "true"
+    # Legacy fields MUST NOT be sent.
+    assert "stopPrice" not in params
+    assert "newClientOrderId" not in params
+    # Result must carry the algoId as order_id.
+    assert result.order_id == 3000001506000001
+    assert result.client_order_id == "SL-PROP-1"
+
+
+def test_place_algo_take_profit_market_uses_new_schema(monkeypatch, doge_spec):
+    client, captured = _algo_client(monkeypatch)
+    ex = LiveExecution(client)
+    result = ex.place_algo_take_profit_market(
+        doge_spec, side="SELL", stop_price=Decimal("0.07900"),
+        quantity=Decimal("100"), client_order_id="TP-PROP-1",
+    )
+    assert result.success
+    params = captured["calls"][-1]["params"]
+    assert params["algoType"] == "CONDITIONAL"
+    assert params["type"] == "TAKE_PROFIT_MARKET"
+    assert params["triggerPrice"] == "0.07900"
+    assert params["clientAlgoId"] == "TP-PROP-1"
+    assert "stopPrice" not in params
+    assert "newClientOrderId" not in params
+
+
+def test_cancel_algo_order_uses_algo_id_param(monkeypatch, doge_spec):
+    client, captured = _algo_client(monkeypatch)
+    ex = LiveExecution(client)
+    ex.cancel_algo_order("DOGEUSDT", algo_id=3000001506000001)
+    call = captured["calls"][-1]
+    assert call["method"] == "DELETE"
+    assert call["path"] == "/fapi/v1/algoOrder"
+    assert call["params"]["symbol"] == "DOGEUSDT"
+    assert call["params"]["algoId"] == "3000001506000001"

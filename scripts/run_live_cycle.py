@@ -203,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         live_execution=live_exec,
         approval_policy=ApprovalPolicy(notional_threshold_usdt=Decimal(args.approval_threshold)),
         approvals_store=PendingApprovalsStore(),
+        safety=safety,                         # naked-rescue path needs to pause
     )
 
     # ---- 4) Fire any previously-approved queue items first ----
@@ -267,10 +268,12 @@ def main(argv: list[str] | None = None) -> int:
         if not can_trade:
             report["warnings"].append(f"mid-cycle safety stop: {_why}")
             break
+        _all_positions_snapshot = PositionsStore().load_all()
         lc = check_proposal(
             state=state, limits=sm_limits, proposed_symbol=spec.symbol,
-            open_positions=PositionsStore().load_open(),
+            open_positions=[p for p in _all_positions_snapshot if p.is_open],
             fired_this_cycle=fired_this_cycle,
+            recently_closed_positions=[p for p in _all_positions_snapshot if not p.is_open],
         )
         if not lc.ok:
             hard = {"paused", "daily_loss_limit", "consecutive_loss_limit",
@@ -385,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
                 mode="SEMI_AUTO_LIVE",
                 order_ids=[str(outcome.order_id)] if outcome.order_id else [],
                 notes=[outcome.approval_decision.reason],
+                algo_order_ids=dict(outcome.algo_order_ids or {}),
             )
             PositionsStore().upsert(position)
             opened_positions.append({
@@ -395,8 +399,18 @@ def main(argv: list[str] | None = None) -> int:
                 "stop_loss": str(stop),
                 "take_profit_targets": [str(t) for t in position.take_profit_targets],
                 "order_id": outcome.order_id,
+                "algo_order_ids": dict(outcome.algo_order_ids or {}),
             })
             fired_this_cycle += 1
+        elif outcome.status == "naked_rescued":
+            # The entry filled but a bracket failed — the router has already
+            # issued the reduce-only close and paused safety. We do NOT persist
+            # a Position, and we stop firing further trades this cycle.
+            report["warnings"].append(
+                f"SAFETY-CRITICAL {spec.symbol}: naked_entry_rescue — "
+                f"{outcome.rejection_reason}"
+            )
+            break
 
     report["routed_outcomes"] = routed_outcomes
     report["opened_positions"] = opened_positions

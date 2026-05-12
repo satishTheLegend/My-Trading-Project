@@ -38,6 +38,16 @@ from .token_research import TokenResearchReport, TimeframeSnapshot
 
 MIN_CONFIDENCE = 0.6
 
+# rngpos_24h = (last - 24h_low) / (24h_high - 24h_low) in [0, 1].
+# A LONG entered with rngpos ≥ 0.85 is chasing into the upper extreme of the
+# day's range — historically these have hit full SL repeatedly (see
+# memory/system-improvements.md ENH-2026-05-11T16:25Z). Same for SHORT below
+# 0.15. Strategies that pick a directional side without a structural reason
+# (momentum_continuation, long_breakout, short_breakdown) hard-reject these
+# extremes BEFORE computing confidence.
+RNGPOS_LONG_REJECT_AT_OR_ABOVE = 0.85
+RNGPOS_SHORT_REJECT_AT_OR_BELOW = 0.15
+
 
 # ----------------------------------------------------------------------------
 # Result types
@@ -146,6 +156,53 @@ def _safe_tf(report: TokenResearchReport, interval: str) -> TimeframeSnapshot | 
     return report.timeframes.get(interval)
 
 
+def _rngpos_24h(report: TokenResearchReport) -> float | None:
+    """24h range position in [0, 1]: 0 = at 24h low, 1 = at 24h high.
+
+    Returns ``None`` if the 24h ticker is missing, malformed, or describes a
+    degenerate range (high == low) where the position is undefined.
+    Strategies that consult this value must treat ``None`` as "no signal" and
+    fall back to existing logic — never as a free pass to enter at extremes.
+    """
+    t = getattr(report, "ticker_24h", None)
+    if not isinstance(t, dict):
+        return None
+    try:
+        high = Decimal(str(t.get("high")))
+        low = Decimal(str(t.get("low")))
+        last = report.last_price
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    if high is None or low is None or last is None:
+        return None
+    rng = high - low
+    if rng <= 0:
+        # Degenerate / flat 24h — refuse to compute rather than divide-by-zero.
+        return None
+    pos = (last - low) / rng
+    try:
+        return float(pos)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rngpos_blocks_side(report: TokenResearchReport, side: str) -> tuple[bool, float | None]:
+    """Return (should_reject, rngpos) for a directional momentum/breakout setup.
+
+    ``rngpos`` is the float in [0, 1] for logging when available; ``None`` when
+    24h data is missing. Missing data => do not reject (fail-open on this gate;
+    other strategy filters still apply).
+    """
+    rp = _rngpos_24h(report)
+    if rp is None:
+        return False, None
+    if side == "LONG" and rp >= RNGPOS_LONG_REJECT_AT_OR_ABOVE:
+        return True, rp
+    if side == "SHORT" and rp <= RNGPOS_SHORT_REJECT_AT_OR_BELOW:
+        return True, rp
+    return False, rp
+
+
 def _none_score(strategy: str, side: str, regime: str, cons: list[str]) -> StrategyScore:
     return StrategyScore(
         strategy=strategy,
@@ -171,6 +228,14 @@ def _long_breakout(r: TokenResearchReport) -> StrategyScore:
     fifteen = _safe_tf(r, "15m")
     if not (one_h and fifteen) or not one_h.sr.resistances:
         return _none_score("long_breakout", "LONG", "bullish", ["missing 1h resistance levels"])
+
+    # Hard-reject chase LONG entries at 24h-range upper extreme (rngpos ≥ 0.85).
+    blocked, rp = _rngpos_blocks_side(r, "LONG")
+    if blocked:
+        return _none_score(
+            "long_breakout", "LONG", "bullish",
+            [f"RNGPOS_EXTREME_REJECT(rngpos={rp:.2f})"],
+        )
 
     pros: list[str] = []
     cons: list[str] = []
@@ -237,6 +302,14 @@ def _short_breakdown(r: TokenResearchReport) -> StrategyScore:
     fifteen = _safe_tf(r, "15m")
     if not (one_h and fifteen) or not one_h.sr.supports:
         return _none_score("short_breakdown", "SHORT", "bearish", ["missing 1h support levels"])
+
+    # Hard-reject chase SHORT entries at 24h-range lower extreme (rngpos ≤ 0.15).
+    blocked, rp = _rngpos_blocks_side(r, "SHORT")
+    if blocked:
+        return _none_score(
+            "short_breakdown", "SHORT", "bearish",
+            [f"RNGPOS_EXTREME_REJECT(rngpos={rp:.2f})"],
+        )
 
     pros: list[str] = []
     cons: list[str] = []
@@ -411,23 +484,36 @@ def _momentum_continuation(r: TokenResearchReport) -> StrategyScore:
 
     if one_h.ema_trend == "up" and fifteen.ema_trend == "up" and fifteen.volume_ratio >= 1.4:
         side = "LONG"
-        conf = 0.45
-        pros.append(f"both 1h and 15m up; 15m vol {fifteen.volume_ratio:.2f}× avg")
-        if 55 <= fifteen.rsi_14 <= 70:
-            conf += 0.15
-            pros.append(f"15m RSI {fifteen.rsi_14:.0f} — strong without exhaustion")
     elif one_h.ema_trend == "down" and fifteen.ema_trend == "down" and fifteen.volume_ratio >= 1.4:
         side = "SHORT"
-        conf = 0.45
-        pros.append(f"both 1h and 15m down; 15m vol {fifteen.volume_ratio:.2f}× avg")
-        if 30 <= fifteen.rsi_14 <= 45:
-            conf += 0.15
-            pros.append(f"15m RSI {fifteen.rsi_14:.0f} — weak without exhaustion")
     else:
         return _none_score(
             "momentum_continuation", "NONE", "any",
             ["mixed trend or insufficient volume"]
         )
+
+    # Hard-reject chase entries at 24h range extremes BEFORE any confidence
+    # accumulates. ENH-2026-05-11T16:25Z: 3 chase fires at rngpos≥0.85 all
+    # hit full SL in one session.
+    blocked, rp = _rngpos_blocks_side(r, side)
+    if blocked:
+        return _none_score(
+            "momentum_continuation", side, "any",
+            [f"RNGPOS_EXTREME_REJECT(rngpos={rp:.2f})"],
+        )
+
+    if side == "LONG":
+        conf = 0.45
+        pros.append(f"both 1h and 15m up; 15m vol {fifteen.volume_ratio:.2f}× avg")
+        if 55 <= fifteen.rsi_14 <= 70:
+            conf += 0.15
+            pros.append(f"15m RSI {fifteen.rsi_14:.0f} — strong without exhaustion")
+    else:  # SHORT
+        conf = 0.45
+        pros.append(f"both 1h and 15m down; 15m vol {fifteen.volume_ratio:.2f}× avg")
+        if 30 <= fifteen.rsi_14 <= 45:
+            conf += 0.15
+            pros.append(f"15m RSI {fifteen.rsi_14:.0f} — weak without exhaustion")
 
     if r.structure.is_overextended_long and side == "LONG":
         conf -= 0.20; cons.append("overextended long")

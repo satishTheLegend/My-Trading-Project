@@ -65,6 +65,190 @@ from .token_screener import ScreeningConfig, run_screener
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 AGENCY_STATE = _PROJECT_ROOT / "data" / "agency-state.json"
+WATCHLIST_PATH = _PROJECT_ROOT / "data" / "watchlist.json"
+OPEN_POSITIONS_PATH = _PROJECT_ROOT / "data" / "open-positions.json"
+
+log = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------------------
+# Watchlist priority injection (task #22)
+# ----------------------------------------------------------------------------
+#
+# The user's hand-curated `data/watchlist.json` carries the highest-conviction
+# setups discovered by manual research (e.g. negative-funding squeeze
+# geometries). These setups must be EVALUATED FIRST by the strategy engine —
+# they MUST NOT receive any relaxation of the engine's confidence / R:R gates.
+#
+# Selection rules (read-only — never mutates the watchlist):
+#   - priority == "high"
+#   - expires_at is in the future (or absent → treated as not-expired)
+#   - side_bias ∈ {"long", "short"} (excludes "neutral")
+#   - symbol not already in open-positions.json with status in is_open set
+#
+# Symbols are returned in the order they appear in the file. The cycle
+# orchestrator then PREPENDS these (resolved to ``(spec, ticker)`` pairs) onto
+# the screener candidate list before research begins.
+
+
+def _parse_iso_to_utc(s: str) -> dt.datetime | None:
+    """Tolerant ISO-8601 parser. Returns UTC-naive datetime or None on failure.
+
+    Accepts trailing 'Z', explicit offsets, or naive ISO strings (assumed UTC).
+    """
+    if not isinstance(s, str) or not s:
+        return None
+    txt = s.strip()
+    if txt.endswith("Z"):
+        txt = txt[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(txt)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def select_watchlist_priority_symbols(
+    watchlist_data: dict | None,
+    open_position_symbols: set[str],
+    now_utc: dt.datetime | None = None,
+) -> list[str]:
+    """Pure selector for the watchlist priority list.
+
+    Args:
+        watchlist_data: parsed contents of ``data/watchlist.json`` (or None
+            if the file is absent / unreadable).
+        open_position_symbols: set of symbols whose Position.is_open is True
+            on disk — these are excluded from the priority list because the
+            cycle does not duplicate open symbols.
+        now_utc: current UTC time (defaults to ``datetime.utcnow()``); injected
+            for deterministic unit tests.
+
+    Returns:
+        Ordered list of symbol strings (watchlist file order preserved).
+    """
+    if not isinstance(watchlist_data, dict):
+        return []
+    entries = watchlist_data.get("watchlist") or []
+    if not isinstance(entries, list):
+        return []
+    now = now_utc or dt.datetime.utcnow()
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        symbol = entry.get("symbol")
+        if not isinstance(symbol, str) or not symbol:
+            continue
+        if entry.get("priority") != "high":
+            continue
+        side_bias = entry.get("side_bias")
+        if side_bias not in ("long", "short"):
+            continue
+        # Expiry check — if expires_at missing/unparseable, treat as not-expired
+        # (the watchlist schema makes expires_at optional in older revisions).
+        expires_at_raw = entry.get("expires_at")
+        if expires_at_raw is not None:
+            expires_at = _parse_iso_to_utc(expires_at_raw)
+            if expires_at is not None and expires_at <= now:
+                continue
+        if symbol in open_position_symbols:
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+    return out
+
+
+def _load_watchlist_priority_symbols(
+    open_position_symbols: set[str],
+    *,
+    watchlist_path: Path = WATCHLIST_PATH,
+    now_utc: dt.datetime | None = None,
+) -> list[str]:
+    """Filesystem-backed wrapper around :func:`select_watchlist_priority_symbols`.
+
+    Never raises — a missing or malformed watchlist file is treated as "no
+    priority symbols" so the cycle falls back cleanly to the screener.
+    """
+    if not watchlist_path.exists():
+        return []
+    try:
+        raw = json.loads(watchlist_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return select_watchlist_priority_symbols(
+        watchlist_data=raw,
+        open_position_symbols=open_position_symbols,
+        now_utc=now_utc,
+    )
+
+
+def prepend_watchlist_priority(
+    priority_symbols: list[str],
+    screener_pairs: list[tuple[Any, Any]],
+    *,
+    specs: dict[str, Any],
+    ticker_fetcher,
+) -> tuple[list[tuple[Any, Any]], list[str], list[dict[str, str]]]:
+    """Build the final ``(spec, ticker)`` candidate list with watchlist-first ordering.
+
+    The strategy engine's confidence / R:R gates are unchanged — this function
+    only reorders the candidate queue so high-conviction setups are evaluated
+    first. If a priority symbol fails the engine downstream, the next
+    candidate (a screener fallback) is evaluated normally.
+
+    Behaviour rules:
+      * Priority symbols already returned by the screener are hoisted to the
+        front (no duplicate pairs).
+      * Priority symbols absent from screener output are resolved via
+        ``specs`` + ``ticker_fetcher(symbol)``.
+      * If a priority symbol is not in ``specs`` (delisted, wrong quote
+        asset), or its ticker fetch raises, it is silently skipped and an
+        entry is added to the returned ``skipped`` list. The cycle continues
+        with the rest.
+
+    Args:
+        priority_symbols: ordered list of high-conviction symbols.
+        screener_pairs: ``(spec, ticker)`` pairs from the screener (any order).
+        specs: ``symbol -> SymbolSpec`` map from exchangeInfo.
+        ticker_fetcher: callable ``symbol -> Ticker24h`` (typically
+            ``market.get_ticker_24h``).
+
+    Returns:
+        ``(candidates_for_research, injected_symbols, skipped)`` where
+        ``candidates_for_research`` is the prepended list and the latter two
+        are reporting hints.
+    """
+    priority_pairs: list[tuple[Any, Any]] = []
+    injected: list[str] = []
+    skipped: list[dict[str, str]] = []
+    remaining_screener: list[tuple[Any, Any]] = list(screener_pairs)
+
+    for sym in priority_symbols:
+        hit = next((p for p in remaining_screener if p[0].symbol == sym), None)
+        if hit is not None:
+            priority_pairs.append(hit)
+            injected.append(sym)
+            remaining_screener = [p for p in remaining_screener if p[0].symbol != sym]
+            continue
+        spec = specs.get(sym)
+        if spec is None:
+            skipped.append({"symbol": sym, "reason": "not in exchangeInfo"})
+            continue
+        try:
+            ticker = ticker_fetcher(sym)
+        except Exception as e:
+            skipped.append({"symbol": sym, "reason": f"ticker fetch failed: {e!r}"})
+            continue
+        priority_pairs.append((spec, ticker))
+        injected.append(sym)
+
+    return priority_pairs + remaining_screener, injected, skipped
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -214,12 +398,16 @@ def main(argv: list[str] | None = None) -> int:
         live_execution=live_exec,
         approval_policy=ApprovalPolicy(),     # not consulted in FULL_AUTO_LIVE
         approvals_store=PendingApprovalsStore(),
+        safety=safety,                         # naked-rescue path needs to pause
     )
     # Mark first-trade flag — in FULL_AUTO_LIVE this is the user's express
     # decision; defensive "first trade asks" is for SEMI_AUTO_LIVE only.
     router._first_live_trade_done = True
 
     # --- 6) Screen + research ---
+    pos_store_for_watchlist = PositionsStore()
+    open_symbols_for_watchlist = {p.symbol for p in pos_store_for_watchlist.load_open()}
+
     if args.symbol:
         info = market.get_exchange_info()
         specs = parse_exchange_info(info)
@@ -240,18 +428,52 @@ def main(argv: list[str] | None = None) -> int:
         screening = run_screener(market, cfg)
         report["screener"] = screening.to_jsonable()
         if not screening.candidates:
+            screener_candidates_pairs: list[Any] = []
+            info = market.get_exchange_info()
+            specs = parse_exchange_info(info)
+        else:
+            info = market.get_exchange_info()
+            specs = parse_exchange_info(info)
+            screener_candidates_pairs = []
+            for c in screening.candidates[: args.top]:
+                spec = specs.get(c.symbol)
+                if spec is None:
+                    continue
+                ticker = market.get_ticker_24h(c.symbol)
+                screener_candidates_pairs.append((spec, ticker))
+
+        # --- 6b) Watchlist priority injection (task #22) ---
+        # Hand-curated, high-conviction setups evaluated FIRST. The strategy
+        # engine's confidence/R:R gates are unchanged — priority means
+        # "evaluated first", NOT "lower the bar". Read-only against the
+        # watchlist file.
+        priority_symbols = _load_watchlist_priority_symbols(
+            open_position_symbols=open_symbols_for_watchlist,
+        )
+        candidates_for_research, injected_symbols, skipped_priority = (
+            prepend_watchlist_priority(
+                priority_symbols=priority_symbols,
+                screener_pairs=screener_candidates_pairs,
+                specs=specs,
+                ticker_fetcher=market.get_ticker_24h,
+            )
+        )
+
+        if injected_symbols:
+            log.info(
+                "Watchlist priority candidates: [%s] injected ahead of screener fallback.",
+                ", ".join(injected_symbols),
+            )
+        report["watchlist_priority"] = {
+            "injected": injected_symbols,
+            "skipped": skipped_priority,
+            "open_position_excluded_count": len(open_symbols_for_watchlist),
+        }
+
+        if not candidates_for_research:
             report["workflow_status"] = "no_candidates"
             _emit(report)
             return 0
-        info = market.get_exchange_info()
-        specs = parse_exchange_info(info)
-        candidates_for_research = []
-        for c in screening.candidates[: args.top]:
-            spec = specs.get(c.symbol)
-            if spec is None:
-                continue
-            ticker = market.get_ticker_24h(c.symbol)
-            candidates_for_research.append((spec, ticker))
 
     risk_cfg = RiskConfig(
         default_margin_per_trade_usdt=Decimal(args.margin_usdt),
@@ -273,10 +495,12 @@ def main(argv: list[str] | None = None) -> int:
             report["warnings"].append(f"mid-cycle safety stop: {reason}")
             break
 
+        all_positions_snapshot = pos_store.load_all()
         limit_check = check_proposal(
             state=state, limits=limits, proposed_symbol=spec.symbol,
-            open_positions=pos_store.load_open(),
+            open_positions=[p for p in all_positions_snapshot if p.is_open],
             fired_this_cycle=fired_this_cycle,
+            recently_closed_positions=[p for p in all_positions_snapshot if not p.is_open],
         )
         if not limit_check.ok:
             # If a hard cap (paused / daily / consec / per_cycle) is breached
@@ -405,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
                 mode="FULL_AUTO_LIVE",
                 order_ids=[str(outcome.order_id)] if outcome.order_id else [],
                 notes=["fired by FULL_AUTO_LIVE cycle"],
+                algo_order_ids=dict(outcome.algo_order_ids or {}),
             )
             pos_store.upsert(position)
             opened_positions.append({
@@ -416,8 +641,18 @@ def main(argv: list[str] | None = None) -> int:
                 "stop_loss": str(stop),
                 "take_profit_targets": [str(t) for t in position.take_profit_targets],
                 "order_id": outcome.order_id,
+                "algo_order_ids": dict(outcome.algo_order_ids or {}),
             })
             fired_this_cycle += 1
+        elif outcome.status == "naked_rescued":
+            # The entry filled but a bracket failed — the router has already
+            # issued the reduce-only close and paused safety. We do NOT persist
+            # a Position, and we stop firing further trades this cycle.
+            report["warnings"].append(
+                f"SAFETY-CRITICAL {spec.symbol}: naked_entry_rescue — "
+                f"{outcome.rejection_reason}"
+            )
+            break
 
     report["routed_outcomes"] = routed_outcomes
     report["opened_positions"] = opened_positions

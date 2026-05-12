@@ -18,10 +18,29 @@ precision quickly and trips Binance's strict step validation.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+# ERROR-20260511-9: defensive guard. Binance USDT-M perp symbols are strictly
+# ASCII (e.g. ``BTCUSDT``); a display-name field like "币安人生USDT" leaking
+# into the symbol slot crashed the engine with -1100 'Illegal characters'.
+# Any symbol that does not match this regex is dropped at parse time so it
+# never reaches the screener, router, or live-execution surface.
+ASCII_USDT_SYMBOL_RE = re.compile(r"^[A-Z0-9]+USDT$")
+
+
+def is_valid_ascii_usdt_symbol(symbol: str) -> bool:
+    """Return True iff ``symbol`` is a plain ASCII USDT-quoted perp symbol.
+
+    See ERROR-20260511-9 in memory/execution-errors.md.
+    """
+    return isinstance(symbol, str) and bool(ASCII_USDT_SYMBOL_RE.match(symbol))
 
 # ----------------------------------------------------------------------------
 # Filter dataclasses
@@ -156,6 +175,15 @@ def parse_exchange_info(exchange_info: dict[str, Any]) -> dict[str, SymbolSpec]:
             spec = parse_symbol_spec(raw)
         except KeyError:
             continue
+        # ERROR-20260511-9: drop any symbol that is not plain ASCII USDT.
+        # This guards against display-name leakage (e.g. "币安人生USDT")
+        # that would otherwise crash Binance's newClientOrderId regex.
+        if not is_valid_ascii_usdt_symbol(spec.symbol):
+            log.warning(
+                "[NON_ASCII_SYMBOL_DROPPED] symbol=%r rejected by ASCII guard",
+                spec.symbol,
+            )
+            continue
         out[spec.symbol] = spec
     return out
 
@@ -263,4 +291,6 @@ __all__ = [
     "round_price",
     "round_qty",
     "validate_order",
+    "is_valid_ascii_usdt_symbol",
+    "ASCII_USDT_SYMBOL_RE",
 ]

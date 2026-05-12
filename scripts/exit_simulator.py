@@ -48,6 +48,22 @@ DECISION_MOVE_STOP_BREAKEVEN = "move_stop_breakeven"
 DECISION_INVALIDATION_EXIT = "invalidation_exit"
 DECISION_EMERGENCY_EXIT = "emergency_exit"
 
+# Modes in which local-price comparisons must NOT mutate position state.
+# In these modes the exchange is the single source of truth — closures are
+# only written locally after `binance_position_sync` confirms zero qty (or a
+# reduce-only fill arrives on a known algoId). See the 2026-05-11 trailing-
+# stop incident in memory/execution-errors.md for the rationale.
+LIVE_MODES = frozenset({"SEMI_AUTO_LIVE", "FULL_AUTO_LIVE"})
+
+# Local-price-driven terminal decisions: emitted from candle-only data, so
+# they are not safe to act on in live mode without exchange confirmation.
+_LOCAL_PRICE_TERMINAL_DECISIONS = frozenset({
+    DECISION_STOP_HIT,
+    DECISION_FULL_TP,
+    DECISION_PARTIAL_TP,
+    DECISION_INVALIDATION_EXIT,
+})
+
 
 @dataclass(frozen=True)
 class ExitDecision:
@@ -299,6 +315,14 @@ def apply_decision(
     For partial fills, qty/realized_pnl/fees are updated incrementally; status
     becomes ``partial_exit`` until everything closes. Terminal decisions set
     ``status=closed`` and stamp ``exit_price``/``exit_reason``.
+
+    **Live-mode safety:** when ``pos.mode`` is a live mode (SEMI_AUTO_LIVE /
+    FULL_AUTO_LIVE) and the decision is a local-price terminal (STOP_HIT,
+    FULL_TP, PARTIAL_TP, INVALIDATION_EXIT), we **do NOT mutate** ``pos`` —
+    only the exchange's truth (or a sync-driven reconciliation) is allowed
+    to close a live position. A note is appended so the divergence is
+    visible in the journal, and a HOLD-equivalent AppliedExit is returned.
+    See the 2026-05-11 trailing-stop incident in memory/execution-errors.md.
     """
     now_iso = now_iso or _now_iso()
 
@@ -309,7 +333,46 @@ def apply_decision(
                            fees_delta=Decimal("0"), qty_closed=Decimal("0"),
                            new_status=pos.status)
 
+    # Live-mode safety gate for local-price terminal decisions. Emitting the
+    # decision is fine (lets the watcher report it), but actually closing the
+    # position locally would desync us from the exchange and risk abandoning
+    # a still-open live trade — exactly the 2026-05-11 incident.
+    if (
+        pos.mode in LIVE_MODES
+        and dec.decision in _LOCAL_PRICE_TERMINAL_DECISIONS
+    ):
+        pos.notes.append(
+            f"live_mode_skipped_local_exit:{dec.decision} ({dec.reason}); "
+            "exchange-side close required — no local state mutation."
+        )
+        pos.updated_at = now_iso
+        return AppliedExit(
+            decision=dec.decision,
+            realized_pnl_delta=Decimal("0"),
+            fees_delta=Decimal("0"),
+            qty_closed=Decimal("0"),
+            new_status=pos.status,
+        )
+
     if dec.decision in (DECISION_TRAIL_STOP, DECISION_MOVE_STOP_BREAKEVEN):
+        # Live mode: never mutate the LOCAL stop without first cancelling and
+        # replacing the exchange algo order. `apply_decision` is pure — it has
+        # no client handle — so in live mode it refuses the mutation. The
+        # watcher routes trailing through `apply_trailing_stop_with_executor`
+        # (see watcher.py) which performs cancel-and-replace atomically.
+        if pos.mode in LIVE_MODES:
+            pos.notes.append(
+                f"live_mode_trail_blocked:{dec.decision} new_sl={dec.new_stop_loss} "
+                f"({dec.reason}); requires exchange algoOrder replace."
+            )
+            pos.updated_at = now_iso
+            return AppliedExit(
+                decision=dec.decision,
+                realized_pnl_delta=Decimal("0"),
+                fees_delta=Decimal("0"),
+                qty_closed=Decimal("0"),
+                new_status=pos.status,
+            )
         if dec.new_stop_loss is not None:
             pos.stop_loss = dec.new_stop_loss
             pos.notes.append(f"stop_moved_to:{dec.new_stop_loss} ({dec.reason})")
@@ -417,6 +480,7 @@ __all__ = [
     "DECISION_MOVE_STOP_BREAKEVEN",
     "DECISION_INVALIDATION_EXIT",
     "DECISION_EMERGENCY_EXIT",
+    "LIVE_MODES",
     "ExitConfig",
     "ExitDecision",
     "AppliedExit",

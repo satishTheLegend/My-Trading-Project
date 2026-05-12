@@ -132,6 +132,69 @@ In FULL_AUTO_LIVE (Phase 6), the agency may execute automatically only after all
 
 `scripts/run_full_auto_cycle.py` is the FULL_AUTO_LIVE entrypoint. Mandatory `--i-understand-this-fires-trades-without-asking` flag. Manual safety ops via `scripts/run_safety_reset.py` (`--status` / `--resume` / `--reset-daily` / `--pause`).
 
+## Current User-Locked Operating Policy (live mainnet, updated 2026-05-11 14:00Z)
+
+These overrides apply to the running agency. Read `session.md` for the full session-context picture before any live action.
+
+- **Wallet ≈ 30 USDT** (live mainnet, BINANCE_TESTNET=false). Targeting 95% deployment across **8 concurrent positions**.
+- **Margin per trade: 3.5 USDT** (sized so 8 × 3.5 = 28 USDT ≈ 93% wallet).
+- **Leverage: 2x–12x, confidence-gated** (ladder below).
+- **Max planned loss per trade: 0.10 USDT STRICT** (TIGHTENED 2026-05-11 ~19:50Z per user instruction "agency should only make profitable trades, max loss 0.10 USDT"). Round quantity down if precision pushes loss > 0.10. NOTE: Earlier session used 0.50 cap; sessions before 2026-05-11 19:50Z reference that older number.
+- **Min strategy confidence: 0.75.** Below this = NO TRADE.
+- **R:R measured at TP2** — required value scales with leverage tier (see ladder).
+- **Exit plan: 33/33/33 scale at TP1/TP2/TP3 if MIN_NOTIONAL allows; otherwise single TP at TP2 level.**
+- **Daily loss cap: 4.0 USDT** (raised from 2.5 for 8-slot config). Auto-pause new fires on breach; existing SLs still run.
+- **Max open positions: 8.** No duplicate symbols.
+- **Per-cycle trade cap: 2.**
+- Decimal-priced tokens are in scope and traded routinely.
+
+**Confidence → Leverage → R:R ladder (revised 2026-05-11 14:10Z, 12x→15x cap):**
+| Confidence | Leverage | Required R:R-at-TP2 |
+| --- | --- | --- |
+| 0.75–0.79 | 2x | ≥ 2.0 |
+| 0.80–0.84 | 3x | ≥ 2.0 |
+| 0.85–0.89 | 5x | ≥ 2.5 |
+| 0.90–0.94 | 8x | ≥ 3.0 |
+| ≥ 0.95 | **15x** | ≥ 3.5 |
+
+Higher leverage = tighter stop. If proposal SL would be < 1.0% from entry (noise-trigger risk), step DOWN one tier even if confidence qualifies.
+
+**Aggressive scalp-exit rules (revised 14:10Z):**
+- Hard cap close at uPnL +2.0 USDT
+- MFE ≥ 1.0 → exit on pullback ≥ 0.25 from MFE
+- MFE ≥ 0.50 → exit on pullback ≥ 0.15 from MFE
+- MFE ≥ 0.30 → exit if 80% gave back
+
+Strategy bias: quick scalp wins, not deep swings. The trade-off is fewer large TPs in exchange for higher win rate on locked partial gains.
+
+**Auto SL trail rule (every 5 min monitor cron):**
+| r_curr reached | Action |
+| --- | --- |
+| ≥ 0.9R | Move SL to breakeven (entry) |
+| ≥ 1.5R | Trail SL to lock +0.5R |
+| ≥ 2.0R | Trail SL to lock +1.0R |
+| ≥ 2.5R | Trail SL to lock +1.5R |
+
+Only TIGHTEN — never widen.
+
+**Auto giveback-protection rule (every 5 min monitor cron):** if a position achieved a meaningful peak and gives most of it back, exit before the gain evaporates.
+| MFE reached | Current uPnL ≤ | Action |
+| --- | --- | --- |
+| ≥ 1.0 USDT | 0.30 USDT | EXIT (reduce-only MARKET close) |
+| ≥ 1.5 USDT | 0.50 USDT | EXIT |
+| ≥ 2.5 USDT | MFE × 0.50 | EXIT (lock half of peak) |
+
+**Auto loss-research rule (every 10 min cron):** any position at r_curr ≤ -0.3R triggers `token-research-agent` to return HOLD / EXIT EARLY / REDUCE PARTIAL. Decisions auto-executed.
+
+**User priorities (verbatim):** *"all trades should take profit"*, *"we want profits not the losses"*, *"skip getting lose"*. The system aggressively manages winners (trail + giveback) and actively researches losers; quality gates are tight.
+
+**Key bug fixes already applied** (see `memory/execution-errors.md` for full detail):
+- ERROR-20260511-4: watcher's local-trailing logic could close live positions on local-price comparison. Fixed via exit_simulator no-op in live mode + opt-in trailing.
+- ERROR-20260511-5: execution_router didn't atomically place SL+TP after fill, and `place_algo_stop_market` used legacy schema. Fixed — atomic bracket + new algoOrder schema + reduce-only-close on bracket failure.
+- ERROR-20260511-6: watcher's `save_all` clobbered concurrent writers. Fixed — fcntl.flock + `apply_watcher_updates` whitelist (only allowed fields: max_favorable_pnl, max_adverse_pnl, unrealized_pnl, updated_at, notes).
+
+**Test status: 213 passing, 5 skipped.**
+
 ## Agent Authority Order
 
 1. Safety/Kill-Switch Agent
